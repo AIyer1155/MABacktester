@@ -19,7 +19,10 @@ if not run:
     st.info("Configure your settings in the sidebar and click Run.")
     st.stop()
 @st.cache_data(ttl=3600)
-raw = yf.download(Ticker, start=Start_date, end=End_date, progress=False)
+def get_data(ticker, start, end):
+    return yf.download(ticker, start=start, end=end, progress=False)
+
+raw = get_data(Ticker, Start_date, End_date)
 
 if raw.empty:
     st.error(f"Error: '{Ticker}' not found. Check the ticker symbol and try again.")
