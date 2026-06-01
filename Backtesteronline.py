@@ -18,7 +18,7 @@ run = st.sidebar.button("Run", type="primary")
 if not run:
     st.info("Configure your settings in the sidebar and click Run.")
     st.stop()
-
+@st.cache_data(ttl=3600)
 raw = yf.download(Ticker, start=Start_date, end=End_date, progress=False)
 
 if raw.empty:
