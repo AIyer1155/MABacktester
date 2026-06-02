@@ -4,8 +4,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
 
-st.set_page_config(page_title="MABacktester", layout="centered")
-st.title("MABacktester")
+st.set_page_config(page_title="Moving Average Backtester", layout="centered")
+st.markdown("""
+<style>
+.block-container { padding-top: 2rem; }
+</style>
+<div style="border: 1px solid #2a2f3a; border-radius: 8px; padding: 12px 20px; margin-bottom: 16px; background-color: #161a23;">
+  <h1 style="margin: 0; color: white;">Moving Average Backtester</h1>
+</div>
+""", unsafe_allow_html=True)
 
 st.sidebar.header("Settings")
 Ticker = st.sidebar.text_input("Enter TICKR:").upper()
