@@ -29,99 +29,153 @@ if not run:
     st.info("Configure your settings in the sidebar and click Run.")
     st.stop()
 
-raw = yf.download(Ticker, start=Start_date, end=End_date, progress=False)
+if FastWindow >= SlowWindow:
+    st.warning("Fast MA should be shorter than Slow MA for a standard crossover. Results may be degenerate.")
 
-if raw.empty:
-    st.error(f"Error: '{Ticker}' not found. Check the ticker symbol and try again.")
+
+# ============ Core backtest, reused for each ticker ============
+def run_backtest(ticker, start, end, fast, slow, cost_bps):
+    """Run a long/flat MA crossover backtest. Returns a dict of results, or None if no data."""
+    raw = yf.download(ticker, start=start, end=end, progress=False)
+    if raw.empty:
+        return None
+
+    df = raw[["Close"]].copy()
+    df.columns = ["price"]
+
+    # Rolling averages over the two window lengths
+    df["fastavg"] = df["price"].rolling(window=fast).mean()
+    df["slowavg"] = df["price"].rolling(window=slow).mean()
+    df = df.dropna()
+    if df.empty:
+        return None
+
+    # Signal is 1 when we want to be in the market and 0 when we want to be flat.
+    # We go in whenever the fast average sits above the slow average.
+    df["signal"] = 0
+    df.loc[df["fastavg"] > df["slowavg"], "signal"] = 1
+
+    # Shift the signal forward a day before trading on it. A crossover we see at
+    # today's close can only be acted on tomorrow, so the position we hold is
+    # yesterday's signal. Using this same lagged position for both returns and
+    # costs keeps them lined up and stops the backtest from peeking at the future.
+    df["position"] = df["signal"].shift(1).fillna(0)
+
+    df["dailyreturn"] = df["price"].pct_change()
+    df["strategyreturn"] = df["dailyreturn"] * df["position"]
+
+    # A trade is any day where the position flips between in and out
+    df["trade"] = df["position"].diff().abs().fillna(0)
+    df["cost"] = df["trade"] * (cost_bps / 10000)
+    df["strategyreturn_net"] = df["strategyreturn"] - df["cost"]
+
+    df = df.dropna()
+
+    # Turn daily returns into the running value of one dollar
+    df["buy_and_hold"] = (1 + df["dailyreturn"]).cumprod()
+    df["strategy_net"] = (1 + df["strategyreturn_net"]).cumprod()
+
+    n_days = len(df)
+    years = n_days / 252 if n_days > 0 else np.nan
+
+    def annualize(total_growth):
+        # total_growth is the final dollar multiple, so 1.35 means the account grew 35 percent
+        if years and years > 0 and total_growth > 0:
+            return total_growth ** (1 / years) - 1
+        return np.nan
+
+    bh_total = df["buy_and_hold"].iloc[-1] - 1
+    net_total = df["strategy_net"].iloc[-1] - 1
+
+    bh_cagr = annualize(df["buy_and_hold"].iloc[-1])
+    str_cagr = annualize(df["strategy_net"].iloc[-1])
+
+    # Sharpe uses a risk free rate of zero and scales the daily numbers up to a year
+    bh_sharpe = df["dailyreturn"].mean() / df["dailyreturn"].std() * np.sqrt(252)
+    str_sharpe = df["strategyreturn_net"].mean() / df["strategyreturn_net"].std() * np.sqrt(252)
+
+    bh_vol = df["dailyreturn"].std() * np.sqrt(252)
+    str_vol = df["strategyreturn_net"].std() * np.sqrt(252)
+
+    # Max drawdown is the worst drop from a running peak
+    bh_peak = df["buy_and_hold"].cummax()
+    str_peak = df["strategy_net"].cummax()
+    bh_maxdd = ((df["buy_and_hold"] - bh_peak) / bh_peak).min()
+    str_maxdd = ((df["strategy_net"] - str_peak) / str_peak).min()
+
+    # Win rate is the fraction of days we were in the market that finished positive.
+    # It is a per day number, not a per trade one, since the rule is a daily long or flat call.
+    in_market = df.loc[df["position"] == 1, "strategyreturn"]
+    win_rate = (in_market > 0).mean() if len(in_market) > 0 else np.nan
+
+    numtrades = int(df["trade"].sum())
+
+    return {
+        "df": df,
+        "bh_total": bh_total, "net_total": net_total,
+        "bh_cagr": bh_cagr, "str_cagr": str_cagr,
+        "bh_sharpe": bh_sharpe, "str_sharpe": str_sharpe,
+        "bh_vol": bh_vol, "str_vol": str_vol,
+        "bh_maxdd": bh_maxdd, "str_maxdd": str_maxdd,
+        "win_rate": win_rate, "numtrades": numtrades,
+    }
+
+
+if not Ticker:
+    st.error("Enter a ticker symbol in the sidebar.")
     st.stop()
 
-df = raw[["Close"]].copy()
-df.columns = ["price"]
-st.write(f"Got {len(df)} days of data")
+res = run_backtest(Ticker, Start_date, End_date, FastWindow, SlowWindow, CostBps)
+if res is None:
+    st.error(f"'{Ticker}' not found or not enough data for these MA windows. "
+             f"Check the symbol or widen the date range.")
+    st.stop()
 
-df["fastavg"] = df["price"].rolling(window=FastWindow).mean()
-df["slowavg"] = df["price"].rolling(window=SlowWindow).mean()
+df = res["df"]
 
-df = df.dropna()
+st.subheader(f"{Ticker}  ·  {FastWindow}/{SlowWindow} day  ·  {res['numtrades']} trades  ·  {CostBps:.0f} bps")
 
-df["signal"] = 0
-df.loc[df["fastavg"] > df["slowavg"], "signal"] = 1
-
-df["dailyreturn"] = df["price"].pct_change()
-
-df["strategyreturn"] = df["dailyreturn"] * df["signal"].shift(1)
-
-df["trade"] = df["signal"].diff().abs().fillna(0)
-df["cost"] = df["trade"] * (CostBps / 10000)
-df["strategyreturn_net"] = df["strategyreturn"] - df["cost"]
-
-df["buy_and_hold"] = (1 + df["dailyreturn"]).cumprod()
-df["strategy"] = (1 + df["strategyreturn"]).cumprod()
-df["strategy_net"] = (1 + df["strategyreturn_net"]).cumprod()
-
-bh_total = df["buy_and_hold"].iloc[-1] - 1
-str_total = df["strategy"].iloc[-1] - 1
-net_total = df["strategy_net"].iloc[-1] - 1
-
-bh_sharpe = df["dailyreturn"].mean() / df["dailyreturn"].std() * np.sqrt(252)
-str_sharpe = df["strategyreturn_net"].mean() / df["strategyreturn_net"].std() * np.sqrt(252)
-
-bh_vol = df["dailyreturn"].std() * np.sqrt(252)
-str_vol = df["strategyreturn_net"].std() * np.sqrt(252)
-
-bh_peak = df["buy_and_hold"].cummax()
-str_peak = df["strategy_net"].cummax()
-bh_maxdd = ((df["buy_and_hold"] - bh_peak) / bh_peak).min()
-str_maxdd = ((df["strategy_net"] - str_peak) / str_peak).min()
-
-numtrades = int(df["trade"].sum())
-
-st.subheader(f"{Ticker}  ·  {FastWindow}/{SlowWindow} day  ·  {numtrades} trades  ·  {CostBps:.0f} bps")
-
-if net_total > bh_total:
-    st.success(f"The strategy beat buy-and-hold after costs by {net_total - bh_total:+.1%}.")
+if res["net_total"] > res["bh_total"]:
+    st.success(f"The strategy beat buy-and-hold after costs by {res['net_total'] - res['bh_total']:+.1%}.")
 else:
-    st.error(f"Buy-and-hold beat the strategy after costs by {bh_total - net_total:.1%}.")
+    st.error(f"Buy-and-hold beat the strategy after costs by {res['bh_total'] - res['net_total']:.1%}.")
 
 col1, col2, col3 = st.columns(3)
-col1.metric("Buy & hold", f"{bh_total:+.1%}")
-col2.metric("MA strategy (net)", f"{net_total:+.1%}", f"{net_total - bh_total:+.1%}")
-col3.metric("Gross of cost", f"{str_total:+.1%}")
+col1.metric("Buy & hold (total)", f"{res['bh_total']:+.1%}")
+col2.metric("MA strategy (net)", f"{res['net_total']:+.1%}", f"{res['net_total'] - res['bh_total']:+.1%}")
+col3.metric("Strategy CAGR", f"{res['str_cagr']:+.1%}", f"{res['str_cagr'] - res['bh_cagr']:+.1%} vs B&H")
 
 col4, col5, col6 = st.columns(3)
-col4.metric("Sharpe", f"{str_sharpe:.2f}", f"{str_sharpe - bh_sharpe:+.2f} vs B&H")
-col5.metric("Volatility", f"{str_vol:.1%}")
-col6.metric("Max drawdown", f"{str_maxdd:.1%}", f"{str_maxdd - bh_maxdd:+.1%} vs B&H")
+col4.metric("Sharpe", f"{res['str_sharpe']:.2f}", f"{res['str_sharpe'] - res['bh_sharpe']:+.2f} vs B&H")
+col5.metric("Volatility", f"{res['str_vol']:.1%}")
+col6.metric("Max drawdown", f"{res['str_maxdd']:.1%}", f"{res['str_maxdd'] - res['bh_maxdd']:+.1%} vs B&H")
 
+col7, col8, col9 = st.columns(3)
+col7.metric("Win rate (in-market days)", f"{res['win_rate']:.1%}")
+col8.metric("Trades", f"{res['numtrades']}")
+col9.metric("B&H max drawdown", f"{res['bh_maxdd']:.1%}")
+
+st.caption(
+    "Long/flat strategy: fully invested when the fast MA is above the slow MA, otherwise in cash. "
+    "Signals are acted on the next bar (no look-ahead); transaction costs are charged per position change. "
+    "Sharpe assumes a 0% risk-free rate. Win rate is the share of in-market days with positive returns."
+)
+
+# Second ticker is optional and just runs the same backtest again
+res2 = None
 if Ticker2:
-    raw2 = yf.download(Ticker2, start=Start_date, end=End_date, progress=False)
-    if raw2.empty:
+    res2 = run_backtest(Ticker2, Start_date, End_date, FastWindow, SlowWindow, CostBps)
+    if res2 is None:
         st.warning(f"'{Ticker2}' not found, skipping comparison.")
-        df2 = None
-    else:
-        df2 = raw2[["Close"]].copy()
-        df2.columns = ["price"]
-        df2["fastavg"] = df2["price"].rolling(window=FastWindow).mean()
-        df2["slowavg"] = df2["price"].rolling(window=SlowWindow).mean()
-        df2 = df2.dropna()
-        df2["signal"] = 0
-        df2.loc[df2["fastavg"] > df2["slowavg"], "signal"] = 1
-        df2["dailyreturn"] = df2["price"].pct_change()
-        df2["strategyreturn"] = df2["dailyreturn"] * df2["signal"].shift(1)
-        df2["trade"] = df2["signal"].diff().abs().fillna(0)
-        df2["cost"] = df2["trade"] * (CostBps / 10000)
-        df2["strategyreturn_net"] = df2["strategyreturn"] - df2["cost"]
-        df2["strategy_net"] = (1 + df2["strategyreturn_net"]).cumprod()
-else:
-    df2 = None
 
+# ============ Charts ============
 plt.style.use("dark_background")
 
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
 fig.patch.set_facecolor("#0E1117")
 ax1.set_facecolor("#0E1117")
 ax2.set_facecolor("#0E1117")
-fig.suptitle(f"{Ticker} — Moving Average Crossover ({FastWindow}/{SlowWindow} day)", fontsize=14, color="white")
+fig.suptitle(f"{Ticker}: Moving Average Crossover ({FastWindow}/{SlowWindow} day)", fontsize=14, color="white")
 
 ax1.plot(df.index, df["price"], label="Price", color="lightgray", linewidth=1)
 ax1.plot(df.index, df["fastavg"], label=f"{FastWindow}d MA", color="deepskyblue", linewidth=1.5)
@@ -138,9 +192,10 @@ ax1.legend(loc="upper left")
 ax1.grid(True, alpha=0.2)
 
 ax2.plot(df.index, df["buy_and_hold"], label=f"{Ticker} buy & hold", color="lightgray", linewidth=1.5)
-ax2.plot(df.index, df["strategy_net"], label=f"{Ticker} MA strategy", color="deepskyblue", linewidth=1.5)
-if df2 is not None:
-    ax2.plot(df2.index, df2["strategy_net"], label=f"{Ticker2} MA strategy", color="violet", linewidth=1.5)
+ax2.plot(df.index, df["strategy_net"], label=f"{Ticker} MA strategy (net)", color="deepskyblue", linewidth=1.5)
+if res2 is not None:
+    ax2.plot(res2["df"].index, res2["df"]["strategy_net"],
+             label=f"{Ticker2} MA strategy (net)", color="violet", linewidth=1.5)
 ax2.axhline(y=1, color="white", linewidth=0.8, linestyle="--")
 ax2.set_ylabel("Growth of $1")
 ax2.set_xlabel("Date")
