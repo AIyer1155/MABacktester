@@ -70,5 +70,6 @@ This project was built to understand how quantitative strategies are constructed
 
 ---
 
-Built by Advay Iyer www.linkedin.com/in/advay-iyer-520506339
+Built by Advay Iyer www.linkedin.com/in/advayiyer
+
 
